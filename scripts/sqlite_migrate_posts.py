@@ -2,7 +2,7 @@
 
 Run: python scripts/sqlite_migrate_posts.py
 
-This will attempt to add columns: platform, external_id, url, status (all TEXT) if they don't exist.
+This will attempt to add columns: platform, external_id, url, status, topic (all TEXT) if they don't exist.
 """
 import sqlite3
 
@@ -28,6 +28,8 @@ def migrate():
         to_add.append("ALTER TABLE Posts ADD COLUMN url TEXT")
     if 'status' not in cols:
         to_add.append("ALTER TABLE Posts ADD COLUMN status TEXT")
+    if 'topic' not in cols:
+        to_add.append("ALTER TABLE Posts ADD COLUMN topic TEXT")
 
     for sql in to_add:
         print('Executing:', sql)

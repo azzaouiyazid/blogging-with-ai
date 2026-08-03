@@ -18,3 +18,4 @@ class Post(Base):  # type: ignore
     external_id = Column('external_id', String(128), nullable=True)
     url = Column('url', String(1024), nullable=True)
     status = Column('status', String(32), nullable=True)
+    topic = Column('topic', String(255), nullable=True)

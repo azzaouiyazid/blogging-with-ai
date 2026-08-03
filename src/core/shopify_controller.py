@@ -5,7 +5,7 @@ from utils.configparser import parse_config
 
 class ShopifyController:
     def __init__(self, store: Optional[str] = None, token: Optional[str] = None, api_version: Optional[str] = None):
-        """Simple Shopify Admin API client for creating blog articles.
+        """Simple Shopify Admin API client for creating and updating blog articles.
 
         Expects config.ini [shopify] section with keys: store (your-store.myshopify.com),
         api_token (private app token), api_version (optional, defaults to 2024-10), blog_id.
@@ -48,6 +48,19 @@ class ShopifyController:
         r = requests.post(url, json=payload, headers=self._headers())
         r.raise_for_status()
         return r.json()["article"]
+
+    def update_article(self, blog_id: int, article_id: int, published: bool = True, published_at: Optional[str] = None) -> Any:
+        """Update an existing article. Use this to publish a draft by setting published=True.
+
+        Returns the updated article object.
+        """
+        payload: Dict[str, Any] = {"article": {"id": article_id, "published": bool(published)}}
+        if published_at:
+            payload["article"]["published_at"] = published_at
+        url = f"{self.base}/blogs/{blog_id}/articles/{article_id}.json"
+        r = requests.put(url, json=payload, headers=self._headers())
+        r.raise_for_status()
+        return r.json().get("article")
 
     def get_all_articles(self, blog_id: int) -> Any:
         url = f"{self.base}/blogs/{blog_id}/articles.json"
