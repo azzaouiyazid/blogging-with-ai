@@ -270,9 +270,3 @@ PY
 
 ---
 
-## Contact / Credits
-- Built and maintained by the repository owner.
-- If you want me to make further changes (human review UI, better claim verification, deployable Docker image), list them and I will implement them next.
-
----
-
