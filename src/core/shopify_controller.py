@@ -21,7 +21,11 @@ class ShopifyController:
 
     def create_article(self, blog_id: int, title: str, body_html: str, tags: list[str] | None = None,
                        summary_html: str | None = None, published_at: str | None = None,
-                       image_src: str | None = None) -> Any:
+                       image_src: str | None = None, published: bool | None = None) -> Any:
+        """Create an article. If `published` is False the article will be created as draft.
+
+        Note: Shopify API accepts `published` and `published_at` (ISO8601) in the article payload.
+        """
         payload: Dict[str, Any] = {
             "article": {
                 "title": title,
@@ -37,6 +41,8 @@ class ShopifyController:
             payload["article"]["published_at"] = published_at
         if image_src:
             payload["article"]["image"] = {"src": image_src}
+        if published is not None:
+            payload["article"]["published"] = bool(published)
 
         url = f"{self.base}/blogs/{blog_id}/articles.json"
         r = requests.post(url, json=payload, headers=self._headers())
