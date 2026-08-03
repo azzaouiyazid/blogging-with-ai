@@ -1,187 +1,278 @@
-# AI-blogger
+# Blogging-with-AI — Shopify Auto-Publisher
 
-## Table of contents
+This repository implements a Shopify-focused automated blogging pipeline powered by retrieval-augmented generation (RAG). It discovers recent, relevant topics in your niche, retrieves and extracts authoritative sources, generates SEO-optimized drafts using an LLM, verifies claims heuristically, creates drafts on Shopify, and sends review messages to Telegram for human approval.
 
-1. Introduction to AI-blogger
-* Origin and objective of the project
-* Explanation of AI-blogger
-2. Setting up WordPress
-* Custom CSS
-* Installation of WordPress and necessary plugins
-* Editing the .htaccess file and wp-config.php 
-3. Setting up search console
-* Link to explanation
-4. Setting up AI-blogger
-* Filling the config.ini file
-* Testing the setup with make test 
-5. Available commands in AI-blogger 
-6. Example usage of AI-blogger
-7. How to contribute to the project
+This README is the authoritative project README aligned to the current repository scope (Shopify-first pipeline). It documents what we changed, what to check, how to run locally, what to verify before publishing, and next recommended steps. An architecture diagram is included below.
 
 ---
 
-Using AI to create a self-sustained blog in seconds.
+## Project overview
 
-See how it works here: https://youtu.be/TlKTIwGa-S4
+Goals
+- Automatically discover trending topics in your niche (past 48 hours by default).
+- Run SERP discovery and fetch top results, extracting main text for grounding.
+- Use RAG to generate SEO-optimized blog posts (title, meta, slug, body_html, tags, FAQ JSON-LD, keywords).
+- Heuristically verify claims against retrieved sources and flag unsupported sentences for review.
+- Create drafts in Shopify (news/blog) and send a Telegram review message with Confirm / Rerun actions.
+- Keep human-in-the-loop approval: drafts are created by default and published only after confirmation.
 
-The AI-blogger project was originated by [Patrick Gerard](https://www.linkedin.com/in/patrick-gerard-konstanz/)
-of [Contentbär](https://content-baer.de) with the objective of demonstrating the
-capabilities of AI in content creation, specifically for the purpose of optimizing search engine results. The aim was to
-create a case study that highlights the potential of AI in this field.
+Primary components
+- discovery: trending topic discovery (NewsAPI)
+- retrieval: SERP retrieval (SerpAPI) + deeper page fetch & extract
+- authoring: RAG writer (chat-completions + function schema) + claim verifier
+- orchestrator: end-to-end pipeline that ties discovery → retrieval → authoring → publish
+- integrations: Shopify controller, Unsplash helper, Telegram review integration
+- storage: SQLite DB to track Posts and lifecycle
 
-Introducing AI-blogger, a powerful command-line tool that harnesses the power of OpenAI API, WordPress, and Python to
-revolutionize the way you create blog posts. Say goodbye to hours of writing, researching, and editing - AI-blogger
-generates high-quality blog posts in mere seconds.
+---
 
-With its advanced AI capabilities, AI-blogger can understand and analyze the context of your topic, generating content
-that is both informative and engaging. Whether you're looking to save time or just need inspiration, AI-blogger is the
-perfect solution for anyone who wants to take their blogging to the next level.
+## Recent changes and current capabilities
 
-Built on the popular WordPress platform, AI-blogger is easy to set up and use, with a user-friendly interface that makes
-it a breeze to create and publish posts. And, with its Python integration, you can customize and extend the
-functionality of AI-blogger to meet your unique needs.
+The repository now implements the following (core features):
+- NewsAPI-based discovery for recent topics (src/discovery/trends.py)
+- SerpAPI adapter to fetch top organic results (src/retrieval/serp.py)
+- Page fetcher with readability/BeautifulSoup extraction, robots.txt checks, polite throttling, and file-cache (.cache/pages) (src/retrieval/fetcher.py, src/retrieval/cache.py)
+- RAG writer using OpenAI Chat Completions + function schema for strict JSON article output (src/authoring/rag_writer.py)
+- Claim verification heuristics that flag unsupported sentences (src/authoring/claim_verifier.py)
+- Orchestrator to run the pipeline and create Shopify drafts (src/orchestrator/auto_publisher.py)
+- ShopifyController with draft creation & publishing endpoints (src/core/shopify_controller.py)
+- Telegram integration for review/approval with inline Confirm / Rerun actions (src/integrations/telegram.py + webhook)
+- DB model updates and a safe SQLite migration helper script to add columns (scripts/sqlite_migrate_posts.py)
+- Utilities: HTTP helper with retries, caching helpers, and configuration parsing
 
-So if you're looking for a faster, easier, and more effective way to create blog posts, look no further than AI-blogger.
-Try it today and see how you can take your blogging to the next level with the power of AI.
+We removed WordPress support to keep the project focused on the Shopify auto-publishing goal (src/core/wordpress_controller.py has been deprecated).
 
-## Setup WordPress
+---
 
-Custom CSS
+## Architecture (diagram)
 
-```
-        .faq-container {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    width: 100%;
-}
+ASCII overview:
 
-h3 {
-    width: 100%;
-    margin-bottom: 10px;
-}
+  [Discovery]
+       |
+       v
+  [SERP retrieval] -> [Page Fetch & Extract (cache)]
+       |
+       v
+  [RAG Writer (LLM, function schema)]
+       |
+       v
+  [Claim Verifier] -> flags -> [Human Review (Telegram)]
+       |
+       v
+  [Create Shopify Draft]  <-- Confirm (Telegram) -- [Publish on Shopify]
 
-.faq-answer {
-    width: 100%;
-    padding: 10px;
-    background-color: #f2f2f2;
-    border-radius: 5px;
-    margin-bottom: 20px;
-}
-```
+Mermaid flow (GitHub supports mermaid diagrams in Markdown):
 
-Install WordPress and download the [JWT Auth Plugin from Useful Team](https://wordpress.org/plugins/jwt-auth/).
-Also download [SEO REST API from Zippy](https://bn.wordpress.org/plugins/seo-rest-api/).
-
-Edit the `.htaccess file` in the root directory of your WordPress installation and add the following line:
-
-How to:
-
-```
-docker exec -it <container_name> bash
-apt-get update
-apt-get install vim
-cd /var/www/html
-vim .htaccess
-```
-
-add the following
-
-```
-RewriteEngine on
-RewriteCond %{HTTP:Authorization} ^(.*)
-RewriteRule ^(.*) - [E=HTTP_AUTHORIZATION:%1]
-SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+```mermaid
+flowchart TD
+  A[Discovery (NewsAPI)] --> B[SERP retrieval (SerpAPI)]
+  B --> C[Page Fetch & Extract (readability / BeautifulSoup)]
+  C --> D[RAG Writer (OpenAI Chat + function schema)]
+  D --> E[Claim Verifier]
+  E --> F[Orchestrator stores Draft in DB]
+  F --> G[ShopifyController creates Draft]
+  G --> H[Telegram Review Message]
+  H -->|Confirm| I[ShopifyController publish draft]
+  H -->|Rerun| D
 ```
 
-also change your `wp-config.php`
+Figure: pipeline sequencing — discovery → retrieval → generation → verification → draft → review → publish.
 
+---
+
+## Prerequisites
+
+- Python 3.9+ (project uses typing annotations that assume 3.9+)
+- Git
+- API keys and accounts:
+  - OpenAI API key (for the Chat Completions API)
+  - NewsAPI key (newsapi.org) for discovery
+  - SerpAPI key (or alternative search provider)
+  - Shopify Admin API token and blog_id for your news/blog
+  - Telegram bot token and your chat id (for review messages)
+  - Optional: Unsplash API (used by existing Unsplash helper)
+
+---
+
+## Configuration (config.ini)
+
+Create a `config.ini` in the repo root (the project expects a simple parser). Example keys the pipeline expects:
+
+```ini
+[gtp3]
+apikey = YOUR_OPENAI_API_KEY
+model = gpt-4-0613
+maxtoken = 2000
+
+[newsapi]
+api_key = YOUR_NEWSAPI_KEY
+
+[serpapi]
+api_key = YOUR_SERPAPI_KEY
+
+[shopify]
+store = your-store.myshopify.com
+api_token = YOUR_SHOPIFY_ADMIN_API_TOKEN
+blog_id = 123456789
+api_version = 2024-10
+# optional
+blog_handle = news
+
+[telegram]
+bot_token = YOUR_TELEGRAM_BOT_TOKEN
+review_chat_id = YOUR_TELEGRAM_CHAT_ID
+
+# optional: unsplash keys, other sections used by existing helpers
+[unsplash]
+api_key = YOUR_UNSPLASH_KEY
 ```
-define('JWT_AUTH_SECRET_KEY', 'your-top-secret-key');
+
+Place your keys and keep this file out of version control (add it to .gitignore).
+
+---
+
+## Install dependencies
+
+Recommended virtual environment and install commands:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+pip install -r requirements.txt
+# optional for better extraction
+pip install readability-lxml beautifulsoup4
+# if you will run the Telegram webhook
+pip install flask requests
 ```
 
-more information: https://github.com/usefulteam/jwt-auth
+(If `requirements.txt` is not present, install these packages manually: requests, sqlalchemy, beautifulsoup4, readability-lxml, flask)
 
-## Setup search console
+---
 
-Explained here: https://content-baer.de/google-search-console-api/
+## Database & migration
 
-## Setup AI-blogger
+The project uses an SQLite database (`db.db`) to store Post records.
 
-fill the `config.ini` with your credentials
+Before running the orchestrator on an existing database, back it up:
 
-Run `make test` to check if everything is working
-
-## Commands
-
-to get an overview of commands use `python3 cli.py --help`
-
-```
-Usage: cli.py [OPTIONS] TOPIC
-
-  Simple CLI tool that uses AI (GPT-3) to generate a WordPress blogpost from a
-  prompt.
-
-Options:
-  --release TEXT        Plan your release of the post e.g.
-                        "2022-12-30T00:00:00"
-  --categories INTEGER  List of categories
-  --tags INTEGER        List of tags
-  --sticky BOOLEAN      Sticky post
-  --search_console      Send post to search console
-  --picture TEXT        Search query for the picture at unsplash.com
-  --faq                 Add FAQ's with Schema-Markup to blogpost
-  --help                Show this message and exit.
+```bash
+cp db.db db.db.bak
 ```
 
-## Example usage
+If your Posts table was created before the model was updated, run the migration helper to add new columns safely:
 
-`python3 cli.py "Das Spiel Leauge of Legends" --picture "Leauge of Legends" --faq --search_console`
+```bash
+python scripts/sqlite_migrate_posts.py
+```
 
-This will create an article about "Das Spiel League of Legends", add a Picture from Unsplash, add FAQ and directly
-sends the released post to the search console.
+This script will run `ALTER TABLE` statements to add `platform`, `external_id`, `url`, `status`, and `topic` if they are missing. Keep a backup as this is non-reversible without a backup.
 
-## How to contribute
+---
 
-1. Fork the repository
-2. Clone the forked repository to your local machine
-3. Make your changes and ensure that all tests are passing
-4. Create a pull request to the original repository
-5. The repository maintainer will review your changes and merge if all tests pass and the changes are deemed to be a
-   positive contribution to the project.
+## Quick local checks (what to verify before running)
 
-Note: It is recommended that contributors run all tests before making a pull request to ensure the integrity of the
-project.
+1. config.ini exists and contains valid API keys mentioned above.
+2. `db.db` either doesn't exist (first run) or you have a backup copy.
+3. `shopify.blog_id` is a valid integer and the provided token has the necessary Admin permissions (write articles).
+4. Telegram credentials are valid and you know your `review_chat_id` (you can get it by messaging the bot or using `getUpdates`).
+5. Optional: Install readability + BS4 for better extraction quality.
 
-*It would be nice if you start contributing by opening an issue for the feature you want to implement or the bug you
-want to fix. This way we can discuss the implementation details before you start coding.*
-*Some ideas are in the TODO.md*
+---
 
-## For people who want to use it
+## How to run locally (safe dry-run first)
 
-Change the config.ini to your needs and play around with it. Feel free to change the `promots and templates` and
-show your results in case they are good.
+1) Discover topics (quick test):
 
-## Setup for non technical people 
+```bash
+PYTHONPATH=src python -c "from discovery.trends import discover_topics; print(discover_topics('your niche', days=2, top_k=5))"
+```
 
-### Installing Python and Required Libraries:
+2) Fetch top SERP results (quick test):
 
-Download the latest version of Python from the official website (https://www.python.org/downloads/).
-Install Python by following the on-screen instructions.
-Open a Command Prompt or Terminal window.
-Navigate to the directory where you have the `requirements.txt` file of the project.
-Type the following command to install the required libraries: `pip install -r requirements.txt`
-Wait for the libraries to be installed.
+```bash
+PYTHONPATH=src python -c "from retrieval.serp import fetch_top_results; import json; print(json.dumps(fetch_top_results('keyword', num=5), indent=2))"
+```
 
-### Installing Docker or using the Script for your deployed WordPress system:
+3) Test page fetch + extraction (robot rules, cache):
 
-Download the latest version of Docker from the official website (https://www.docker.com/products/docker-desktop).
-Install Docker by following the on-screen instructions.
-Open a Command Prompt or Terminal window.
-Navigate to the directory where you have the `docker-compose.yml` file of the project.
-Type the following command to install the required libraries: `docker-compose up -d`
-Wait for the libraries to be installed.
+```bash
+PYTHONPATH=src python -c "from retrieval.fetcher import fetch_and_extract; import json; print(json.dumps(fetch_and_extract('https://example.com'), indent=2))"
+```
 
-* In case you want to use it with your production wordpress version, just change the config.ini 
+4) Run the orchestrator in dry-run (no Shopify calls):
 
--> From there on follow the steps above (`.htaacess file plugins,..` and finally running the tool from your CLI)
+```bash
+PYTHONPATH=src python -c "from orchestrator.auto_publisher import run_once; import json; print(json.dumps(run_once('your niche', days=2, topics_k=3, snippets_per_topic=3, dry_run=True), indent=2))"
+```
+
+5) Create actual Shopify drafts (only when you verified config and credentials):
+
+```bash
+PYTHONPATH=src python -c "from orchestrator.auto_publisher import run_once; print(run_once('your niche', dry_run=False))"
+```
+
+6) Run the Telegram webhook locally (for review callbacks):
+
+```bash
+PYTHONPATH=src python src/integrations/telegram_webhook.py
+# expose with ngrok for Telegram to call your webhook:
+# ngrok http 5000
+# set webhook:
+# curl "https://api.telegram.org/bot<token>/setWebhook?url=https://<ngrok-url>/telegram_webhook"
+```
+
+7) (Optional) Send a manual review message for testing:
+
+```bash
+PYTHONPATH=src python - <<'PY'
+from integrations.telegram import send_review_message
+from utils.configparser import parse_config
+cfg = parse_config()
+chat_id = cfg['telegram']['review_chat_id']
+article = {"title":"Test","meta_description":"Meta","slug":"test","body_html":"<p>Test</p>","tags":[],"faq_jsonld":"[]","seo_keywords":[]}
+print(send_review_message(chat_id, 1, article))
+PY
+```
+
+---
+
+## What to check after a run
+
+- Check `.cache/pages` for cached page files (ensures caching is working).
+- Check `db.db` rows in the `Posts` table. Each run should create Post records with `status` = 'draft' (or 'failed').
+- If dry_run=False and Shopify credentials are correct, drafts should appear in your Shopify blog (verify `Posts.external_id` stores the article id).
+- Telegram: you should receive a review message in the configured chat. Use Confirm to publish or Rerun to regenerate.
+- Inspect logs for OpenAI usage and potential errors — ensure you have token budget monitored.
+
+---
+
+## Next recommended steps (prioritized)
+
+1. Add a human-review UI (simple Flask app) to view drafts and flagged sentences, with Approve/Reject actions.
+2. Implement crawl-delay parsing in robots.txt and honor site-specific crawl delays per-domain.
+3. Add SERP response caching and a small quota system to avoid hitting provider limits.
+4. Add claim-verification improvements (semantic similarity using embeddings rather than word overlap) for more robust checks.
+5. Use a task queue (Celery/RQ + Redis) to schedule and scale discovery runs.
+6. Add monitoring: token usage, success/failure rates, and Search Console integration for performance measurement.
+
+---
+
+## Files removed / deprecated
+- WordPress support removed and replaced with a deprecation stub: `src/core/wordpress_controller.py` is no longer active. The original implementation is archived in `scripts/archived/` (if present) for recovery.
+
+---
+
+## Troubleshooting
+- OpenAI errors: check `config.ini` for valid key and that usage limits are not exceeded.
+- Shopify errors: ensure Admin API token has correct scopes (write content) and `blog_id` exists for the store.
+- Robots/403 on fetcher: some sites block scraping; the fetcher will respect robots.txt and may return `disallowed by robots.txt`.
+
+---
+
+## Contact / Credits
+- Built and maintained by the repository owner.
+- If you want me to make further changes (human review UI, better claim verification, deployable Docker image), list them and I will implement them next.
+
+---
+
