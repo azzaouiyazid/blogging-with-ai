@@ -1,11 +1,4 @@
-"""Orchestrator that runs discovery -> retrieval -> RAG writer -> create draft in Shopify and stores a DB record.
-
-Usage:
-    from orchestrator.auto_publisher import run_once
-    run_once('your niche here', dry_run=True)
-
-By default dry_run=True (no Shopify API calls). Set dry_run=False to actually create drafts in Shopify.
-"""
+"""Updated orchestrator to use deeper retrieval (fetch page content) before RAG."""
 from __future__ import annotations
 
 from typing import List, Dict, Any, Optional
@@ -14,6 +7,7 @@ import json
 
 from discovery.trends import discover_topics
 from retrieval.serp import fetch_top_results
+from retrieval.fetcher import fetch_snippets_for_results
 from authoring.rag_writer import generate_article
 from core.shopify_controller import ShopifyController
 from core.unsplash import Unsplash
@@ -34,7 +28,7 @@ def _ensure_release_dt(release: Optional[str] | datetime.datetime | None) -> dat
 
 
 def run_once(niche: str, days: int = 2, topics_k: int = 3, snippets_per_topic: int = 3, dry_run: bool = True) -> List[Dict[str, Any]]:
-    """Discover recent topics and generate drafts.
+    """Discover recent topics and generate drafts using deeper retrieval.
 
     Returns a list of result dicts with keys: topic, article (the generated JSON), shopify (api response or None), db (Post id)
     """
@@ -48,9 +42,12 @@ def run_once(niche: str, days: int = 2, topics_k: int = 3, snippets_per_topic: i
     db = Database()
 
     for topic in topics:
-        snippets = fetch_top_results(topic, num=snippets_per_topic)
+        serp_results = fetch_top_results(topic, num=snippets_per_topic)
+        # deeper retrieval: fetch and extract canonical page text for each result
+        enriched_snippets = fetch_snippets_for_results(serp_results, max_chars=1200)
         try:
-            article = generate_article(topic=topic, snippets=snippets, primary_keyword=topic, target_wordcount=900)
+            # Pass enriched snippets (they contain 'excerpt' and 'text') to the RAG writer
+            article = generate_article(topic=topic, snippets=enriched_snippets, primary_keyword=topic, target_wordcount=900)
         except Exception as e:
             results.append({'topic': topic, 'error': str(e)})
             continue
