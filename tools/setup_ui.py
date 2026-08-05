@@ -5,6 +5,7 @@ import configparser
 import json
 import sqlite3
 import os
+import requests
 
 # Make sure src is importable
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,8 @@ st.markdown("""
 This local UI helps you configure and validate the blogging-with-ai project.
 - Create or edit config.ini (service account upload supported)
 - Validate LLM (Gemini) credentials
+- Configure API keys and scheduler
+- Add keywords (dashboard)
 - Run discovery / retrieval smoke tests
 - Inspect the SQLite DB and run migration
 - Run the orchestrator in dry-run
@@ -35,6 +38,13 @@ def write_config(cfg: configparser.ConfigParser, path: Path):
         cfg.write(f)
 
 
+def read_config(path: Path) -> configparser.ConfigParser:
+    cfg = configparser.ConfigParser()
+    if path.exists():
+        cfg.read(path)
+    return cfg
+
+
 st.sidebar.header("Config file")
 config_file_path = REPO_ROOT / 'config.ini'
 st.sidebar.write(f"Config file: {config_file_path}")
@@ -48,176 +58,240 @@ else:
 CRED_DIR = REPO_ROOT / '.credentials'
 CRED_DIR.mkdir(exist_ok=True)
 SERVICE_ACCOUNT_PATH = CRED_DIR / 'gemini_service_account.json'
+DATA_DIR = REPO_ROOT / 'data'
+DATA_DIR.mkdir(exist_ok=True)
+KEYWORDS_FILE = DATA_DIR / 'keywords.json'
 
-with st.expander("Upload / manage service account (recommended)", expanded=True):
-    st.write("Upload a Google Cloud service account JSON for Gemini (the file will be stored locally at ~/.credentials and configured automatically).")
-    uploaded_file = st.file_uploader('Upload gemini service account JSON', type=['json'], accept_multiple_files=False)
-    if uploaded_file is not None:
+# Load existing keywords or empty list
+def load_keywords():
+    if KEYWORDS_FILE.exists():
         try:
-            content = uploaded_file.read()
-            parsed = json.loads(content)
-            # basic validation
-            client_email = parsed.get('client_email')
-            project_id = parsed.get('project_id')
-            if not client_email or not project_id:
-                st.error('Uploaded JSON does not look like a valid service account key (missing client_email or project_id).')
-            else:
-                # ensure credentials dir exists and write file with secure permissions
-                CRED_DIR.mkdir(mode=0o700, exist_ok=True)
-                with open(SERVICE_ACCOUNT_PATH, 'wb') as f:
-                    f.write(content)
-                try:
-                    os.chmod(SERVICE_ACCOUNT_PATH, 0o600)
-                except Exception:
-                    # chmod may fail on Windows; ignore
-                    pass
-                st.success(f'Wrote service account JSON to {SERVICE_ACCOUNT_PATH}')
-                st.write(f'Project: {project_id} — {client_email}')
+            return json.loads(KEYWORDS_FILE.read_text())
+        except Exception:
+            return []
+    return []
 
-                # update or create config.ini with gemini.service_account_file
-                cfg = configparser.ConfigParser()
-                if config_file_path.exists():
-                    cfg.read(config_file_path)
-                if not cfg.has_section('llm'):
-                    cfg.add_section('llm')
-                if not cfg.has_section('gemini'):
-                    cfg.add_section('gemini')
-                cfg.set('llm', 'provider', cfg.get('llm', 'provider', fallback='gemini'))
-                cfg.set('gemini', 'service_account_file', str(SERVICE_ACCOUNT_PATH))
-                cfg.set('gemini', 'model', cfg.get('gemini', 'model', fallback='text-bison-001'))
-                write_config(cfg, config_file_path)
-                st.info(f'Updated {config_file_path} with gemini.service_account_file')
-        except json.JSONDecodeError:
-            st.error('Uploaded file is not valid JSON')
-        except Exception as e:
-            st.error(f'Error saving service account file: {e}')
+def save_keywords(keywords):
+    KEYWORDS_FILE.write_text(json.dumps(keywords, indent=2, ensure_ascii=False))
 
-    if SERVICE_ACCOUNT_PATH.exists():
-        st.write('Service account currently stored at:')
-        st.code(str(SERVICE_ACCOUNT_PATH))
-        if st.button('Remove stored service account'):
+
+# Top-level tabs
+tabs = st.tabs(["Settings", "Scheduler", "Dashboard (Keywords)", "Posts", "Logs & Actions"]) 
+
+# --- Settings tab ---
+with tabs[0]:
+    st.header("Settings")
+    cfg = read_config(config_file_path)
+
+    llm_section = cfg.get('llm', {}) if cfg is not None else {}
+    provider = llm_section.get('provider', 'gemini')
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.subheader("LLM / API keys")
+        prov = st.selectbox('LLM provider', options=['gemini', 'openai'], index=0 if provider == 'gemini' else 1)
+
+        # Gemini section
+        st.markdown('### Gemini')
+        gem_api_key = cfg.get('gemini', {}).get('api_key', '')
+        gem_api_key_input = st.text_input('Gemini API key (optional)', value=gem_api_key, key='gem_api_key')
+        gem_model = cfg.get('gemini', {}).get('model', 'text-bison-001')
+        gem_model_input = st.text_input('Gemini model', value=gem_model, key='gem_model')
+        st.write('Service account upload available in the main setup section.')
+
+        # OpenAI
+        st.markdown('### OpenAI (fallback)')
+        openai_api_key = cfg.get('gtp3', {}).get('apikey', '')
+        openai_api_key_input = st.text_input('OpenAI API key', value=openai_api_key, key='openai_api_key')
+        openai_model = cfg.get('gtp3', {}).get('model', 'text-davinci-002')
+        openai_model_input = st.text_input('OpenAI model', value=openai_model, key='openai_model')
+
+        # Other keys
+        st.markdown('### Other services')
+        newsapi_key = cfg.get('newsapi', {}).get('api_key', '')
+        newsapi_key_input = st.text_input('NewsAPI key', value=newsapi_key, key='newsapi_key')
+        serpapi_key = cfg.get('serpapi', {}).get('api_key', '')
+        serpapi_key_input = st.text_input('SerpAPI key', value=serpapi_key, key='serpapi_key')
+        shop_store = cfg.get('shopify', {}).get('store', '')
+        shop_store_input = st.text_input('Shopify store (your-store.myshopify.com)', value=shop_store, key='shop_store')
+        shop_token = cfg.get('shopify', {}).get('api_token', '')
+        shop_token_input = st.text_input('Shopify admin api_token', value=shop_token, key='shop_token')
+
+        if st.button('Save settings'):
+            # write back to config.ini
+            if not cfg.has_section('llm'):
+                cfg.add_section('llm')
+            cfg.set('llm', 'provider', prov)
+            if not cfg.has_section('gemini'):
+                cfg.add_section('gemini')
+            cfg.set('gemini', 'api_key', gem_api_key_input)
+            cfg.set('gemini', 'model', gem_model_input)
+            if not cfg.has_section('gtp3'):
+                cfg.add_section('gtp3')
+            cfg.set('gtp3', 'apikey', openai_api_key_input)
+            cfg.set('gtp3', 'model', openai_model_input)
+            if not cfg.has_section('newsapi'):
+                cfg.add_section('newsapi')
+            cfg.set('newsapi', 'api_key', newsapi_key_input)
+            if not cfg.has_section('serpapi'):
+                cfg.add_section('serpapi')
+            cfg.set('serpapi', 'api_key', serpapi_key_input)
+            if not cfg.has_section('shopify'):
+                cfg.add_section('shopify')
+            cfg.set('shopify', 'store', shop_store_input)
+            cfg.set('shopify', 'api_token', shop_token_input)
+            write_config(cfg, config_file_path)
+            st.success('Settings saved to config.ini')
+
+    with col2:
+        st.subheader('Quick tests')
+        st.write('Use these buttons to validate that API keys work (short tests).')
+
+        if st.button('Test Gemini LLM'):
+            st.info('Testing Gemini LLM...')
             try:
-                SERVICE_ACCOUNT_PATH.unlink()
-                st.success('Removed stored service account file')
-            except Exception as e:
-                st.error(f'Failed to remove file: {e}')
-
-
-st.header('Validation & Tests')
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader('LLM validation')
-    niche_input = st.text_input('Test prompt', value='Say hello in one sentence')
-    if st.button('Validate LLM'):
-        st.info('Running LLM test...')
-        try:
-            from utils.llm import LLMClient
-            client = LLMClient()
-            out = client.generate(niche_input, max_tokens=64)
-            if out:
-                st.success('LLM call succeeded')
+                from utils.llm import LLMClient
+                client = LLMClient()
+                out = client.generate('Say hi in one sentence', max_tokens=20)
+                st.success('Gemini test succeeded')
                 st.code(out)
-            else:
-                st.warning('LLM call returned empty response — check credentials and model')
-        except Exception as e:
-            st.error(f'LLM validation failed: {e}')
+            except Exception as e:
+                st.error(f'Gemini test failed: {e}')
 
-    st.subheader('Discovery test (NewsAPI)')
-    niche = st.text_input('Niche for discovery', value='shopify')
-    if st.button('Run discovery'):
-        st.info('Running discovery.trends.discover_topics...')
+        if st.button('Test OpenAI key'):
+            st.info('Testing OpenAI API...')
+            try:
+                from utils.llm import LLMClient
+                client = LLMClient(provider='openai')
+                out = client.generate('Say hi in one sentence', max_tokens=20)
+                st.success('OpenAI test succeeded')
+                st.code(out)
+            except Exception as e:
+                st.error(f'OpenAI test failed: {e}')
+
+        if st.button('Test NewsAPI key'):
+            st.info('Testing NewsAPI...')
+            try:
+                cfg = read_config(config_file_path)
+                key = cfg.get('newsapi', {}).get('api_key')
+                if not key:
+                    raise RuntimeError('No NewsAPI key configured')
+                r = requests.get('https://newsapi.org/v2/top-headlines', params={'apiKey': key, 'q': 'shopify', 'pageSize': 1}, timeout=10)
+                r.raise_for_status()
+                st.success('NewsAPI test succeeded')
+                st.json(r.json())
+            except Exception as e:
+                st.error(f'NewsAPI test failed: {e}')
+
+        if st.button('Test SerpAPI key'):
+            st.info('Testing SerpAPI...')
+            try:
+                cfg = read_config(config_file_path)
+                key = cfg.get('serpapi', {}).get('api_key')
+                if not key:
+                    raise RuntimeError('No SerpAPI key configured')
+                r = requests.get('https://serpapi.com/search.json', params={'q': 'shopify trends', 'api_key': key, 'num': 1}, timeout=10)
+                r.raise_for_status()
+                st.success('SerpAPI test succeeded')
+                st.json(r.json())
+            except Exception as e:
+                st.error(f'SerpAPI test failed: {e}')
+
+# --- Scheduler tab ---
+with tabs[1]:
+    st.header('Scheduler')
+    cfg = read_config(config_file_path)
+    if not cfg.has_section('scheduler'):
+        cfg.add_section('scheduler')
+    start_time = cfg.get('scheduler', {}).get('start_time', '09:00')
+    days_per_week = cfg.get('scheduler', {}).get('days_per_week', '3')
+    start_time_input = st.time_input('Start time (local)', value=st.time(9, 0))
+    days_per_week_input = st.number_input('Days to post per week', min_value=1, max_value=7, value=int(days_per_week))
+    if st.button('Save schedule'):
+        cfg.set('scheduler', 'start_time', start_time_input.strftime('%H:%M'))
+        cfg.set('scheduler', 'days_per_week', str(days_per_week_input))
+        write_config(cfg, config_file_path)
+        st.success('Scheduler saved')
+
+# --- Dashboard (Keywords) tab ---
+with tabs[2]:
+    st.header('Keywords Dashboard')
+    st.write('Add keywords that the orchestrator will track and create content for.')
+    keywords = load_keywords()
+    # Convert to list of dicts suitable for experimental_data_editor
+    if not isinstance(keywords, list):
+        keywords = []
+    if len(keywords) == 0:
+        keywords = [{'keyword': '', 'priority': 3, 'niche': '', 'tags': '', 'enabled': True}]
+
+    # Use Streamlit's data editor for an editable table
+    try:
+        edited = st.experimental_data_editor(keywords, num_rows="dynamic", use_container_width=True)
+    except Exception:
+        # fallback for older Streamlit
+        edited = keywords
+
+    col_save, col_imp = st.columns(2)
+    with col_save:
+        if st.button('Save keywords'):
+            save_keywords(edited)
+            st.success(f'Saved {len(edited)} keywords to {KEYWORDS_FILE}')
+    with col_imp:
+        uploaded_csv = st.file_uploader('Import keywords CSV', type=['csv'])
+        if uploaded_csv is not None:
+            import csv
+            text = uploaded_csv.read().decode('utf-8')
+            reader = csv.DictReader(text.splitlines())
+            rows = [r for r in reader]
+            save_keywords(rows)
+            st.success(f'Imported {len(rows)} keywords')
+
+# --- Posts tab ---
+with tabs[3]:
+    st.header('Posts')
+    st.write('View drafts and scheduled posts (if db.db exists)')
+    db_path = REPO_ROOT / 'db.db'
+    if db_path.exists():
         try:
-            from discovery.trends import discover_topics
-            topics = discover_topics(niche, days=2, top_k=5)
-            st.write(topics)
+            conn = sqlite3.connect(str(db_path))
+            cur = conn.cursor()
+            cur.execute("SELECT id, title, status, scheduled_at FROM Posts ORDER BY scheduled_at LIMIT 50;")
+            rows = cur.fetchall()
+            st.write(rows)
+            conn.close()
         except Exception as e:
-            st.error(f'Discovery test failed: {e}')
+            st.error(f'Error querying Posts table: {e}')
+    else:
+        st.info('No db.db present — run the orchestrator to create posts')
 
-    st.subheader('SERP fetch test (SerpAPI)')
-    serp_query = st.text_input('SERP query', value='shopify trends')
-    if st.button('Fetch SERP top results'):
-        st.info('Running retrieval.serp.fetch_top_results...')
-        try:
-            from retrieval.serp import fetch_top_results
-            import json as _json
-            res = fetch_top_results(serp_query, num=5)
-            st.json(res)
-        except Exception as e:
-            st.error(f'SERP fetch failed: {e}')
-
-with col2:
-    st.subheader('Page fetch & extract')
-    url = st.text_input('URL to fetch', value='https://example.com')
-    if st.button('Fetch & extract page'):
-        st.info('Running retrieval.fetcher.fetch_and_extract...')
-        try:
-            from retrieval.fetcher import fetch_and_extract
-            res = fetch_and_extract(url)
-            st.json(res)
-        except Exception as e:
-            st.error(f'Fetch failed: {e}')
-
-    st.subheader('Orchestrator (dry-run)')
-    orchestrator_niche = st.text_input('Orchestrator niche', value='shopify')
+# --- Logs & Actions tab ---
+with tabs[4]:
+    st.header('Logs & Actions')
+    st.write('Run diagnostics, export logs, or execute actions')
     if st.button('Run orchestrator (dry-run)'):
         st.info('Running orchestrator.auto_publisher.run_once (dry_run=True)...')
         try:
             from orchestrator.auto_publisher import run_once
-            import json
-            out = run_once(orchestrator_niche, days=2, topics_k=2, snippets_per_topic=2, dry_run=True)
+            out = run_once('shopify', days=2, topics_k=2, snippets_per_topic=2, dry_run=True)
             st.json(out)
         except Exception as e:
             st.error(f'Orchestrator dry-run failed: {e}')
 
-st.header('Database & Migration')
-
-db_path = REPO_ROOT / 'db.db'
-if db_path.exists():
-    st.write(f'Database at {db_path}')
-    if st.button('Show Posts (first 20 rows)'):
-        try:
-            conn = sqlite3.connect(str(db_path))
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = cur.fetchall()
-            st.write('Tables:', tables)
-            # safe attempt to query Posts table
-            try:
-                cur.execute("SELECT * FROM Posts LIMIT 20;")
-                rows = cur.fetchall()
-                st.write(rows)
-            except Exception:
-                st.warning('Posts table not found or query failed')
-            conn.close()
-        except Exception as e:
-            st.error(f'Error reading database: {e}')
-else:
-    st.warning('No db.db found in repository root. Run the orchestrator to create one or provide an existing DB.')
-
-if st.button('Run sqlite_migrate_posts.py'):
-    st.info('Running scripts/sqlite_migrate_posts.py...')
-    try:
-        import subprocess
-        res = subprocess.run([sys.executable, str(REPO_ROOT / 'scripts' / 'sqlite_migrate_posts.py')], capture_output=True, text=True)
-        st.text(res.stdout + '\n' + res.stderr)
-    except Exception as e:
-        st.error(f'Migration failed: {e}')
-
-st.header('Telegram')
-if st.button('Send test review message to Telegram'):
-    st.info('Sending test message (if configured)')
-    try:
-        from utils.configparser import parse_config
-        cfg = parse_config()
-        chat = cfg['telegram']['review_chat_id']
-        from integrations.telegram import send_review_message
-        article = {"title": "Test", "meta_description": "meta", "slug": "test", "body_html": "<p>test</p>", "tags": [], "faq_jsonld": "[]", "seo_keywords": []}
-        res = send_review_message(chat, 1, article)
-        st.write(res)
-    except Exception as e:
-        st.error(f'Telegram test failed: {e}')
+    if st.button('Collect logs (zip)'):
+        st.info('Collecting logs...')
+        import zipfile, io
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            if config_file_path.exists():
+                z.writestr('config.ini', config_file_path.read_text())
+            if SERVICE_ACCOUNT_PATH.exists():
+                z.writestr('service_account.json', SERVICE_ACCOUNT_PATH.read_text())
+            if KEYWORDS_FILE.exists():
+                z.writestr('keywords.json', KEYWORDS_FILE.read_text())
+            if (REPO_ROOT / 'db.db').exists():
+                z.write(str(REPO_ROOT / 'db.db'), arcname='db.db')
+        buf.seek(0)
+        st.download_button('Download logs.zip', data=buf, file_name='logs.zip')
 
 st.markdown('---')
 st.markdown('If you need help, paste the error outputs here and I can help you triage them.')
