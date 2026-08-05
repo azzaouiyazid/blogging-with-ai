@@ -1,6 +1,9 @@
-lint:
-	mypy src --strict
-	flake8 src --max-line-length 120
+# Convenience Makefile
 
-test:
-	pytest src/tests
+.PHONY: setup ui
+
+setup:
+	bash scripts/setup_local.sh
+
+ui:
+	streamlit run tools/setup_ui.py
