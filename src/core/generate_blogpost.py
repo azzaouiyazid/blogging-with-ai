@@ -2,6 +2,7 @@ from tests.test_openai import Openai
 from utils.configparser import parse_config
 from typing import Any, Dict, List
 import pypandoc
+from utils.llm import LLMClient
 
 
 def clean_numerisch_geordnet(to_clean: str) -> Dict[str, str]:
@@ -34,12 +35,22 @@ def blogpost_wordpress(contents: Dict[str, str]) -> str:
     return blogpost
 
 
-class AIBlogpost(Openai):
+class AIBlogpost:
+    """AI-backed blogpost generator using a provider-agnostic LLM client.
+
+    This replaces the previous OpenAI-specific inheritance and defaults to Gemini
+    as the LLM provider (configurable via [llm].provider in config.ini).
+    """
+
     def __init__(self, topic: str, api_key: str | None = None):
-        super().__init__(api_key=api_key)
+        # keep topic and config
         self.topic = topic
         self.config = parse_config()
         self.token_usage: List[int] = []
+        # use the new LLMClient
+        self.llm = LLMClient()
+
+        # generate TOC, contents, sources using the LLM
         self.toc = self.generate_toc(prompt=f'Schreibe ein Inhaltsverzeichnis für einen AIBlogpost zum Thema '
                                             f'{self.topic} numerisch geordnet es sollte mindestens 15'
                                             f' Einträge lang sein')
@@ -54,15 +65,22 @@ class AIBlogpost(Openai):
         self.meta_desc = ""
 
     def generate(self, prompt: str) -> Any:
-        while True:
-            response = self.make_request(prompt=prompt)
-            if response.get('error', None) is not None:
-                # print(f'OpenAI request was not successful: {response["error"]["message"]}')
-                pass
-            else:
-                # print(f"OpenAI request: {prompt} was successful")
-                self.token_usage.append(response['usage']['total_tokens'])
-                return response['choices'][0]['text']
+        """Call the configured LLM and return the text response.
+
+        The wrapper hides provider differences; we return the raw string.
+        """
+        # max_tokens: fallback to config or default
+        try:
+            max_tokens = int(self.config['gtp3'].get('maxtoken', 2000))
+        except Exception:
+            max_tokens = 2000
+        text = self.llm.generate(prompt=prompt, max_tokens=max_tokens, temperature=0.0)
+        # best-effort token accounting (approx)
+        try:
+            self.token_usage.append(len(text.split()))
+        except Exception:
+            pass
+        return text
 
     @property
     def wordcount(self) -> int:
@@ -72,18 +90,14 @@ class AIBlogpost(Openai):
 
     @property
     def token_costs(self) -> float:
-        return (sum(self.token_usage) * 0.0200) / 1000
+        # Notional cost calculation: preserve previous OpenAI-based heuristic but keep it simplistic.
+        # For Gemini, billing differs; consider replacing this with provider-specific calculations.
+        return (sum(self.token_usage) * 0.0200) / 1000 if self.token_usage else 0.0
 
     def generate_toc(self, prompt: str) -> Dict[str, str]:
         request = self.generate(prompt=prompt)
         toc = clean_numerisch_geordnet(request)
         print("TOC generated, now generating contents")
-        # toc = {'Die Geschichte von AI': '', 'Die Definition von AI': '', 'Die Vor- und Nachteile von AI': '',
-        #        'Die Risiken von AI': '', 'Die ethischen Fragen von AI': '', 'Die politischen Fragen von AI': '',
-        #        'Die wirtschaftlichen Fragen von AI': '', 'Die sozialen Fragen von AI': '',
-        #        'Die künstliche Intelligenz in der Medizin': '', 'Die künstliche Intelligenz in der Bildung': '',
-        #        'Die künstliche Intelligenz im Militär': '', 'Die künstliche Intelligenz in der Wissenschaft': '',
-        #        'Die künstliche Intelligenz in der Gesellschaft': '', 'Die Zukunft von AI': '', 'Fazit': ''}
         return toc
 
     def generate_sources(self) -> Dict[str, str]:
